@@ -1,7 +1,8 @@
 version     = "0.1.0"
 author      = "Michał Zieliński <michal@zielinscy.org.pl>"
 description = "High-level Nim bindings for userspace SCTP implementation"
-license     = "MIT"
+license     = "BSD"
+skipDirs = @["tests"]
 
 # Deps
 
