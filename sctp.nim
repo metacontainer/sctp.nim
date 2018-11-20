@@ -32,6 +32,7 @@ type
     rawPackets: Pipe[Buffer]
     mySctpPackets: Pipe[SctpPacket]
     sctpPackets*: Pipe[SctpPacket]
+    closed: bool
 
   SctpError* = object of IOError
 
@@ -64,8 +65,9 @@ proc getConnFromSocket(sock: ptr sctp_socket): SctpConn =
   if addrs[].sa_family != AF_CONN:
     return nil
 
-  let sconn = cast[ptr sockaddr_conn](addrs)
-  result = cast[SctpConn](sconn.sconn_addr);
+  var sconn: sockaddr_conn
+  copyMem(addr sconn, addrs, sizeof(sockaddr_conn))
+  result = cast[SctpConn](sconn.sconn_addr)
   usrsctp_freeladdrs(addrs)
 
 proc sendThresholdCbInLoop(sock: ptr sctp_socket) =
@@ -113,8 +115,18 @@ proc init*() =
       usrsctp_sysctl_set_sctp_debug_on(0xffffffff'u32)
 
 proc doClose(self: SctpConn) =
+  echo "closing"
   usrsctp_close(self.sock)
+  self.sock = nil
   usrsctp_deregister_address(cast[pointer](self))
+  # TODO: GC references
+
+proc close*(self: SctpConn) =
+  if not self.closed:
+    self.closed = true
+    self.mySctpPackets.close
+    self.rawPackets.close
+    self.doClose
 
 proc getAddress(self: SctpConn, port: int): sockaddr_conn =
   var sconn: sockaddr_conn
@@ -169,9 +181,19 @@ proc trySend(self: SctpConn, packet: SctpPacket): bool =
 
   return true
 
+proc shutdownSend(self: SctpConn) =
+  let res = usrsctp_shutdown(self.sock, SHUT_WR)
+  if res < 0:
+    stderr.writeLine "usrscrp: shutdown failed (?)"
+
 proc trySendAll(self: SctpConn) =
   # TODO: enable Nagle and then disable before sending last packet
   let inp = self.mySctpPackets.input
+
+  if inp.isSendClosed:
+    self.shutdownSend
+    return
+
   while inp.dataAvailable > 0:
     let packet = inp.peekMany[0]
     if self.trySend(packet):
@@ -180,6 +202,9 @@ proc trySendAll(self: SctpConn) =
       return
 
 proc tryRecv(self: SctpConn): Option[SctpPacket] =
+  if self.sock == nil:
+    return none(SctpPacket)
+
   let buf = newView(byte, 16 * 1024)
   var flags: cint
   var infotype: cuint = SCTP_RECVV_RCVINFO
@@ -195,7 +220,8 @@ proc tryRecv(self: SctpConn): Option[SctpPacket] =
                           addr infolen,
                           addr infotype,
                           addr flags)
-  # TODO: we should handle really messages > 16k
+
+  # TODO: we should really handle messages > 16k
   if ret < 0:
     if errno == EWOULDBLOCK:
       return none(SctpPacket)
@@ -215,7 +241,42 @@ proc tryRecvAll(self: SctpConn) =
     if packet.isNone:
       break
 
-    doAssert output.maybeSend(packet.get) == true
+    if packet.get.data.len == 0:
+      # eof
+      output.sendClose(JustClose)
+      break
+    else:
+      doAssert output.maybeSend(packet.get) == true
+
+proc dataOutput*(self: SctpConn): ByteOutput =
+  let (input, output) = newInputOutputPair[byte]()
+
+  proc piper() {.async.} =
+    while true:
+      # read a big chunk, SCTP will split it into packets for us
+      let data = await input.readSome(12 * 1024)
+      await self.sctpPackets.output.send(
+        SctpPacket(data: newView(data))
+      )
+
+  piper().onErrorClose(output)
+
+  return output
+
+proc dataInput*(self: SctpConn): ByteInput =
+  let (input, output) = newInputOutputPair[byte]()
+
+  proc piper() {.async.} =
+    asyncFor pkt in self.sctpPackets.input:
+      if pkt.streamId == 0:
+        await output.write(pkt.data)
+
+  piper().onErrorClose(output)
+
+  return input
+
+proc dataPipe*(self: SctpConn): BytePipe =
+  return BytePipe(input: self.dataInput, output: self.dataOutput)
 
 proc newSctpConn*(packets: Pipe[Buffer], sport=1, dport=1): SctpConn =
   init()
