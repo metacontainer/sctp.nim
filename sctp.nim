@@ -1,5 +1,8 @@
 import sctp/lowlevel, reactor, collections/views, collections, posix
 
+proc debug*(x: varargs[string]) =
+  stderr.writeLine(join(x, " "))
+
 type
 
   SctpReliabilityKind* = enum
@@ -115,7 +118,7 @@ proc init*() =
       usrsctp_sysctl_set_sctp_debug_on(0xffffffff'u32)
 
 proc doClose(self: SctpConn) =
-  echo "closing"
+  debug "shutdown"
   usrsctp_close(self.sock)
   self.sock = nil
   usrsctp_deregister_address(cast[pointer](self))
@@ -177,7 +180,7 @@ proc trySend(self: SctpConn, packet: SctpPacket): bool =
     if errno == EWOULDBLOCK:
       return false
 
-    raise newException(SctpError, "sendv returned error")
+    raise newException(SctpError, "sendv returned error ($1)" % $errno)
 
   return true
 
@@ -190,16 +193,16 @@ proc trySendAll(self: SctpConn) =
   # TODO: enable Nagle and then disable before sending last packet
   let inp = self.mySctpPackets.input
 
-  if inp.isSendClosed:
-    self.shutdownSend
-    return
-
   while inp.dataAvailable > 0:
     let packet = inp.peekMany[0]
     if self.trySend(packet):
       inp.discardItems 1
     else:
-      return
+      break
+
+  if inp.dataAvailable == 0 and inp.isSendClosed:
+    self.shutdownSend
+    return
 
 proc tryRecv(self: SctpConn): Option[SctpPacket] =
   if self.sock == nil:
@@ -252,6 +255,7 @@ proc dataOutput*(self: SctpConn): ByteOutput =
   let (input, output) = newInputOutputPair[byte]()
 
   proc piper() {.async.} =
+    defer: self.sctpPackets.output.sendClose
     while true:
       # read a big chunk, SCTP will split it into packets for us
       let data = await input.readSome(12 * 1024)
@@ -259,7 +263,7 @@ proc dataOutput*(self: SctpConn): ByteOutput =
         SctpPacket(data: newView(data))
       )
 
-  piper().onErrorClose(output)
+  piper().onFinishClose(output)
 
   return output
 
@@ -271,7 +275,7 @@ proc dataInput*(self: SctpConn): ByteInput =
       if pkt.streamId == 0:
         await output.write(pkt.data)
 
-  piper().onErrorClose(output)
+  piper().onFinishClose(output)
 
   return input
 
@@ -326,7 +330,7 @@ proc newSctpConn*(packets: Pipe[Buffer], sport=1, dport=1): SctpConn =
 
   packets.input.forEach(proc(data: Buffer) =
     usrsctp_conninput(cast[pointer](self), addr data[0], data.len, 0)
-  ).ignore
+  ).onFinishClose(self.mySctpPackets.output)
 
   self.trySendAll
   self.tryRecvAll

@@ -24,7 +24,6 @@ proc main() {.async.} =
   let f = tryAwait connA.sctpPackets.input.receive
   assert f.isError
 
-  # should this be expected behaviour?
   # await connA.sctpPackets.output.send(SctpPacket(data: newView("aa")))
   # let r3 = await connB.sctpPackets.input.receive
   # assert r3.data.copyAsString == "aa"
