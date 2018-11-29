@@ -251,36 +251,42 @@ proc tryRecvAll(self: SctpConn) =
     else:
       doAssert output.maybeSend(packet.get) == true
 
+proc pipe*(input: ByteInput, self: SctpConn) {.async.} =
+  defer: self.sctpPackets.output.sendClose
+  while true:
+    # read a big chunk, SCTP will split it into packets for us
+    let data = await input.readSome(12 * 1024)
+    await self.sctpPackets.output.send(
+      SctpPacket(data: newView(data))
+    )
+
 proc dataOutput*(self: SctpConn): ByteOutput =
   let (input, output) = newInputOutputPair[byte]()
 
-  proc piper() {.async.} =
-    defer: self.sctpPackets.output.sendClose
-    while true:
-      # read a big chunk, SCTP will split it into packets for us
-      let data = await input.readSome(12 * 1024)
-      await self.sctpPackets.output.send(
-        SctpPacket(data: newView(data))
-      )
-
-  piper().onFinishClose(output)
+  pipe(input, self).onFinishClose(output)
 
   return output
+
+proc pipe*(self: SctpConn, output: ByteOutput) {.async.} =
+  asyncFor pkt in self.sctpPackets.input:
+    if pkt.streamId == 0:
+      await output.write(pkt.data)
 
 proc dataInput*(self: SctpConn): ByteInput =
   let (input, output) = newInputOutputPair[byte]()
 
-  proc piper() {.async.} =
-    asyncFor pkt in self.sctpPackets.input:
-      if pkt.streamId == 0:
-        await output.write(pkt.data)
-
-  piper().onFinishClose(output)
+  pipe(self, output).onFinishClose(output)
 
   return input
 
 proc dataPipe*(self: SctpConn): BytePipe =
   return BytePipe(input: self.dataInput, output: self.dataOutput)
+
+proc pipe*(self: SctpConn, stream: BytePipe) {.async.} =
+  await zipVoid(@[
+    pipe(self, stream.output),
+    pipe(stream.input, self)
+  ])
 
 proc newSctpConn*(packets: Pipe[Buffer], sport=1, dport=1): SctpConn =
   init()
