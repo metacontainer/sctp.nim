@@ -252,12 +252,16 @@ proc tryRecvAll(self: SctpConn) =
       doAssert output.maybeSend(packet.get) == true
 
 proc pipe*(input: ByteInput, self: SctpConn) {.async.} =
-  defer: self.sctpPackets.output.sendClose
   while true:
     # read a big chunk, SCTP will split it into packets for us
-    let data = await input.readSome(12 * 1024)
+    let data = tryAwait input.readSome(12 * 1024)
+
+    if data.isError:
+      self.sctpPackets.output.sendClose
+      break
+
     await self.sctpPackets.output.send(
-      SctpPacket(data: newView(data))
+      SctpPacket(data: newView(data.get))
     )
 
 proc dataOutput*(self: SctpConn): ByteOutput =
@@ -303,7 +307,7 @@ proc newSctpConn*(packets: Pipe[Buffer], sport=1, dport=1): SctpConn =
   self.mySctpPackets.input.onRecvReady.addListener(proc() = self.trySendAll)
   self.mySctpPackets.output.onSendReady.addListener(proc() = self.tryRecvAll)
 
-  # disable linger (avoid call after the object is destructed, but also prevents queued packets from being sent after!)
+  # disable linger (avoid getting calls after the object is destructed, but also prevents queued packets from being sent after!)
   var linger_opt = TLinger(l_onoff: 1, l_linger: 0)
   doAssert 0 == usrsctp_setsockopt(self.sock, SOL_SOCKET, SO_LINGER, addr linger_opt, sizeof(linger_opt).Socklen)
   doAssert 0 == usrsctp_set_non_blocking(self.sock, 1)
