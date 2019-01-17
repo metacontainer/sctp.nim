@@ -15,15 +15,15 @@ type
   SctpReliabilityPolicy* = object
     unordered*: bool
 
-    case reliability: SctpReliabilityKind
+    case reliability*: SctpReliabilityKind
     of sctpReliable, sctpUnreliable:
       discard
     of sctpBufferReliability:
-      maxBufferSize: int # in bytes
+      maxBufferSize*: int # in bytes
     of sctpTimedReliability:
-      deadline: reactor.Time
+      deadline*: reactor.Time
     of sctpRtxReliability:
-      maxRtx: int
+      maxRtx*: int
 
   SctpPacket* = object
     data*: Buffer
