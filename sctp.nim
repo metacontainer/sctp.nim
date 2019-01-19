@@ -251,18 +251,20 @@ proc tryRecvAll(self: SctpConn) =
     else:
       doAssert output.maybeSend(packet.get) == true
 
-proc pipe*(input: ByteInput, self: SctpConn) {.async.} =
+proc pipe*(input: ByteInput, self: SctpConn, close=false) {.async.} =
   while true:
     # read a big chunk, SCTP will split it into packets for us
     let data = tryAwait input.readSome(12 * 1024)
 
     if data.isError:
-      self.sctpPackets.output.sendClose
       break
 
     await self.sctpPackets.output.send(
       SctpPacket(data: newView(data.get))
     )
+
+  if close:
+    self.sctpPackets.output.sendClose
 
 proc dataOutput*(self: SctpConn): ByteOutput =
   let (input, output) = newInputOutputPair[byte]()
@@ -271,10 +273,13 @@ proc dataOutput*(self: SctpConn): ByteOutput =
 
   return output
 
-proc pipe*(self: SctpConn, output: ByteOutput) {.async.} =
+proc pipe*(self: SctpConn, output: ByteOutput, close=false) {.async.} =
   asyncFor pkt in self.sctpPackets.input:
     if pkt.streamId == 0:
       await output.write(pkt.data)
+
+  if close:
+    output.sendClose
 
 proc dataInput*(self: SctpConn): ByteInput =
   let (input, output) = newInputOutputPair[byte]()
